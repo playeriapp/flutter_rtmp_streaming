@@ -52,3 +52,9 @@
    - **iOS（HaishinKit 2.2.1+ / 2.2.2+ / 2.2.5+）**：`setVideoSettings` — 可选参数 `expectedFrameRate`（写入 RTMP onMetaData 的 `framerate`）、`bitRateMode`（`average` / `constant` / `variable`）；`setMultitaskingCameraAccessEnabled` — 分屏/多任务场景下保持相机（需 iOS 17+ 且设备支持）。
 4. 本版本变更日志与上述说明对应，便于查阅与版本对齐。
 
+
+
+## 1.0.6
+1. 修改安卓下面#8问题
+
+
