@@ -1,8 +1,8 @@
-group 'com.app.rtmp_stream'
-version '1.0.5'
+group 'com.app.rtmp_streaming'
+version '1.0.6'
 
 buildscript {
-    ext.kotlin_version = '2.3.10'
+    ext.kotlin_version = '2.4.0'
     repositories {
         google()
         mavenCentral()
@@ -23,7 +23,6 @@ rootProject.allprojects {
 }
 
 apply plugin: 'com.android.library'
-apply plugin: 'kotlin-android'
 
 android {
     namespace 'com.app.rtmp_stream'
@@ -50,5 +49,5 @@ android {
 dependencies {
     implementation 'androidx.annotation:annotation:1.9.1'
     implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk7:$kotlin_version"
-    implementation 'com.github.pedroSG94.RootEncoder:library:2.7.1'
+    implementation 'com.github.pedroSG94.RootEncoder:library:2.7.3'
 }
