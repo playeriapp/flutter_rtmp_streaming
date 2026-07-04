@@ -60,6 +60,7 @@ import com.pedro.encoder.input.gl.render.filters.`object`.GifObjectFilterRender
 import com.pedro.encoder.input.gl.render.filters.`object`.ImageObjectFilterRender
 import com.pedro.encoder.input.gl.render.filters.`object`.SurfaceFilterRender
 import com.pedro.encoder.input.gl.render.filters.`object`.TextObjectFilterRender
+import com.pedro.encoder.input.video.CameraHelper
 import com.pedro.encoder.input.video.CameraHelper.Facing.BACK
 import com.pedro.encoder.utils.gl.AspectRatioMode
 import com.pedro.encoder.utils.gl.TranslateTo
@@ -215,7 +216,8 @@ class CameraNativeView(
 
     private fun prepareVideoEncoder(size: Size, bitrate: Int): Boolean {
         val fps = customVideoFps ?: 30
-        return rtmpCamera.prepareVideo(size.width, size.height, fps, bitrate)
+        val rotation = CameraHelper.getCameraOrientation(getActivity() ?: glView.context)
+        return rtmpCamera.prepareVideo(size.width, size.height, fps, bitrate, rotation)
     }
 
     fun prepareForVideoStreaming(result: MethodChannel.Result) {
