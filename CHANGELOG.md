@@ -1,3 +1,8 @@
+## 1.0.8
+
+1. Fixed an error in the prepareVideo parameter that could cause compilation errors.
+
+
 ## 1.0.7
 1. **Dependency upgrades**
    - iOS: `HaishinKit` pod bumped from `2.0.9` to **`2.2.5`** (aligned with Swift Package; Xcode 26.4, multitasking camera, etc.).

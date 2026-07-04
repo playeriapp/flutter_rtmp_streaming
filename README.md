@@ -200,7 +200,7 @@ Returns `StreamStatistics` while streaming. Key fields:
 | `cacheSize` | Send buffer size |
 | `sentAudioFrames` / `sentVideoFrames` | Android |
 | `droppedAudioFrames` / `droppedVideoFrames` | Android |
-| `isAudioMuted` / `isVideoMuted` | Both platforms (1.0.7+) |
+| `isAudioMuted` / `isVideoMuted` | Both platforms (1.0.8+) |
 | `rttMicros` | Android RTT (requires `setRtmpShouldSendPings`) |
 | `bytesSend` | Bytes sent |
 
@@ -238,4 +238,4 @@ await controller.startVideoStreaming(url);
 
 ## 🚀 Conclusion
 `rtmp_streaming` provides cross-platform RTMP streaming and recording for Flutter.  
-Since **1.0.7**, temporary audio/video mute, encoder settings, and frame rate APIs are aligned on both platforms; iOS retains playback and multitasking extras, Android retains filters, BT.709, and RTT.
+Since **1.0.8**, temporary audio/video mute, encoder settings, and frame rate APIs are aligned on both platforms; iOS retains playback and multitasking extras, Android retains filters, BT.709, and RTT.

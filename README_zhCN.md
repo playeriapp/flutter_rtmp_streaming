@@ -212,7 +212,7 @@ await controller.startVideoStreaming(url);
 | `cacheSize` | 发送缓存大小 |
 | `sentAudioFrames` / `sentVideoFrames` | 已发送帧数（Android） |
 | `droppedAudioFrames` / `droppedVideoFrames` | 丢弃帧数（Android） |
-| `isAudioMuted` / `isVideoMuted` | 是否静音（双端，1.0.7+） |
+| `isAudioMuted` / `isVideoMuted` | 是否静音（双端，1.0.8+） |
 | `rttMicros` | RTMP 往返时延（Android，需 `setRtmpShouldSendPings`） |
 | `bytesSend` | 已发送字节数 |
 
@@ -257,4 +257,4 @@ await controller.startVideoStreaming(url);
 
 ## 🚀 总结
 `rtmp_streaming` 为 Flutter 开发者提供跨平台、现代化的 RTMP 推流与视频录制能力。  
-自 **1.0.7** 起，音视频临时静音、编码参数设置、帧率配置等 API 已在双端对齐；iOS 仍保留播放控制与多任务相机等扩展能力，Android 保留滤镜、BT.709、RTT 等扩展能力。
+自 **1.0.8** 起，音视频临时静音、编码参数设置、帧率配置等 API 已在双端对齐；iOS 仍保留播放控制与多任务相机等扩展能力，Android 保留滤镜、BT.709、RTT 等扩展能力。
