@@ -86,6 +86,7 @@ class CameraNativeView(
     private val glView = OpenGlView(activity)
     private val rtmpCamera: RtmpCamera2
     private var isSurfaceCreated = false
+    private var isSurfaceReady = false
     private var fps = 0
     private val aBitrate = 128 * 1000
     private val vBitrate = 1200 * 1000
@@ -125,37 +126,77 @@ class CameraNativeView(
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
-        Log.d("CameraNativeView", "surfaceCreated")
-        isSurfaceCreated = true
-        glView.post { restorePreviewAfterSurfaceChange() }
+    Log.d("CameraNativeView", "surfaceCreated")
+    // Do not start the camera here. The surface does not necessarily have its
+    // final dimensions until surfaceChanged is called.
+}
+
+override fun surfaceChanged(
+    holder: SurfaceHolder,
+    format: Int,
+    width: Int,
+    height: Int
+) {
+    Log.d(
+        "CameraNativeView",
+        "surfaceChanged: ${width}x${height}, format=$format"
+    )
+
+    if (width <= 0 || height <= 0) {
+        return
     }
 
-    override fun surfaceChanged(p0: SurfaceHolder, p1: Int, p2: Int, p3: Int) {
-        // TODO("Not yet implemented")
+    isSurfaceCreated = true
+
+    // surfaceChanged can be called multiple times for the same surface.
+    if (isSurfaceReady) {
+        return
     }
 
-    override fun surfaceDestroyed(p0: SurfaceHolder) {
-        Log.d("CameraNativeView", "surfaceDestroyed")
-        if (rtmpCamera.isStreaming) {
-            resumeStreamAfterSurfaceCreated = true
-            isRestoringFromSurfaceDestroy = true
-            try {
-                rtmpCamera.stopStream()
-            } catch (e: Exception) {
-                Log.e("CameraNativeView", "stopStream on surfaceDestroyed failed", e)
-                isRestoringFromSurfaceDestroy = false
-                resumeStreamAfterSurfaceCreated = false
-            }
+    isSurfaceReady = true
+
+    glView.post {
+        if (isSurfaceCreated) {
+            restorePreviewAfterSurfaceChange()
         }
-        if (rtmpCamera.isOnPreview) {
-            try {
-                rtmpCamera.stopCamera()
-            } catch (e: Exception) {
-                Log.e("CameraNativeView", "stopCamera on surfaceDestroyed failed", e)
-            }
-        }
-        isSurfaceCreated = false
     }
+}
+
+override fun surfaceDestroyed(holder: SurfaceHolder) {
+    Log.d("CameraNativeView", "surfaceDestroyed")
+
+    isSurfaceCreated = false
+    isSurfaceReady = false
+
+    if (rtmpCamera.isStreaming) {
+        resumeStreamAfterSurfaceCreated = true
+        isRestoringFromSurfaceDestroy = true
+
+        try {
+            rtmpCamera.stopStream()
+        } catch (e: Exception) {
+            Log.e(
+                "CameraNativeView",
+                "stopStream on surfaceDestroyed failed",
+                e
+            )
+            isRestoringFromSurfaceDestroy = false
+            resumeStreamAfterSurfaceCreated = false
+        }
+    }
+
+    if (rtmpCamera.isOnPreview) {
+        try {
+            rtmpCamera.stopCamera()
+        } catch (e: Exception) {
+            Log.e(
+                "CameraNativeView",
+                "stopCamera on surfaceDestroyed failed",
+                e
+            )
+        }
+    }
+}
 
     override fun onConnectionStarted(url: String) {
         activity?.runOnUiThread {
@@ -1035,13 +1076,23 @@ class CameraNativeView(
         }
         cameraName = targetCamera
 
-        Log.d("CameraNativeView", "startPreview: $preset camera=$targetCamera")
-        if (!isSurfaceCreated) {
+        Log.d(
+            "CameraNativeView",
+            "startPreview: preset=$preset camera=$targetCamera " +
+                "surface=${glView.width}x${glView.height}"
+            )
+        if (!isSurfaceCreated || !isSurfaceReady) {
+            Log.d("CameraNativeView", "startPreview skipped: surface not ready")
             return false
         }
         return try {
             val previewSize = CameraUtils.computeBestPreviewSize(getActivity(), cameraName, preset)
             val size = previewSize["size"] as Size
+            Log.d(
+                "CameraNativeView",
+                "starting camera preview: requested=${size.width}x${size.height}, " +
+                    "surface=${glView.width}x${glView.height}"
+            )
             rtmpCamera.startPreview(targetCamera, size.width, size.height)
             true
         } catch (e: CameraAccessException) {
@@ -1172,13 +1223,16 @@ class CameraNativeView(
 
     override fun dispose() {
         isSurfaceCreated = false
+        isSurfaceReady = false
         resumeStreamAfterSurfaceCreated = false
         isRestoringFromSurfaceDestroy = false
         lastStreamUrl = null
         lastStreamBitrate = null
+
         if (rtmpCamera.isOnPreview) {
-            rtmpCamera.stopCamera()
+        rtmpCamera.stopCamera()
         }
+
         activity = null
     }
 
