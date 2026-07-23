@@ -791,7 +791,15 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
 
         val result = pendingStreamStartResult
         pendingStreamStartResult = null
+
         streamStartInProgress = false
+        isRestoringFromSurfaceDestroy = false
+        resumeStreamAfterSurfaceCreated = false
+
+        Log.d(
+            "CameraNativeView",
+            "stream startup completed successfully"
+        )
 
         result?.success(null)
     }
@@ -807,13 +815,31 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
 
         val result = pendingStreamStartResult
         pendingStreamStartResult = null
-        streamStartInProgress = false
 
-        result?.error(
-            code,
-            message,
-            null
+        streamStartInProgress = false
+        isRestoringFromSurfaceDestroy = false
+        resumeStreamAfterSurfaceCreated = false
+
+        Log.e(
+            "CameraNativeView",
+            "stream startup failed: $message"
         )
+
+        if (result != null) {
+            result.error(
+                code,
+                message,
+                null
+            )
+        } else {
+            // Internal surface recovery has no MethodChannel result to complete.
+            getActivity()?.runOnUiThread {
+                dartMessenger?.send(
+                    DartMessenger.EventType.RTMP_STOPPED,
+                    message
+                )
+            }
+        }
     }
 
     private fun cancelPendingStreamStart(
@@ -1549,40 +1575,47 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
             isRestoringFromSurfaceDestroy = false
             return
         }
+
+        if (
+            isDisposed ||
+            !isSurfaceCreated ||
+            !isSurfaceReady
+        ) {
+            return
+        }
+
+        Log.d(
+            "CameraNativeView",
+            "surface restored — reopening camera before resuming RTMP"
+        )
+
         resumeStreamAfterSurfaceCreated = false
         previewStartRequested = false
-        try {
-            if (rtmpCamera.isOnPreview) {
-                rtmpCamera.stopCamera()
-            }
-            val streamingSize = CameraUtils.computeBestPreviewSize(getActivity(), cameraName, preset)
-            val size = streamingSize["size"] as Size
-            val bitrateRes = lastStreamBitrate ?: customVideoBitrate ?: (streamingSize["bitrate"] as Int)
-            rtmpCamera.forceBt709Color(forceBt709Color)
-            (rtmpCamera.streamClient as? RtmpStreamClient)?.shouldSendPings(rtmpShouldSendPings)
-            val prepared = prepareAudioEncoder() && prepareVideoEncoder(size, bitrateRes)
-            if (rtmpCamera.isRecording || prepared) {
-                Log.d("CameraNativeView", "resumeStreamAfterSurfaceChange: $url")
-                rtmpCamera.startStream(url)
-            } else {
-                isRestoringFromSurfaceDestroy = false
-                getActivity()?.runOnUiThread {
-                    dartMessenger?.send(
-                        DartMessenger.EventType.RTMP_STOPPED,
-                        "Failed to resume stream after background"
-                    )
-                }
-            }
-        } catch (e: Exception) {
-            Log.e("CameraNativeView", "resumeStreamAfterSurfaceChange failed", e)
-            isRestoringFromSurfaceDestroy = false
-            getActivity()?.runOnUiThread {
-                dartMessenger?.send(
-                    DartMessenger.EventType.RTMP_STOPPED,
-                    e.message ?: "Failed to resume stream after background"
-                )
-            }
+
+        // surfaceDestroyed() stopped both RTMP and the camera. Reuse the normal
+        // startup gate so Camera2 preview is reopened and confirmed active before
+        // the video encoder and RTMP stream are started again.
+        if (streamStartInProgress) {
+            Log.d(
+                "CameraNativeView",
+                "surface resume ignored — stream start already in progress"
+            )
+            return
         }
+
+        streamStartInProgress = true
+
+        // Internal surface recovery was not initiated by a Dart method call.
+        pendingStreamStartResult = null
+
+        val deadlineMs =
+            SystemClock.uptimeMillis() + previewReadyTimeoutMs
+
+        waitForPreviewThenStartStream(
+            url,
+            lastStreamBitrate,
+            deadlineMs
+        )
     }
 
     fun getStreamStatistics(result: MethodChannel.Result) {
