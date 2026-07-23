@@ -307,11 +307,10 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
         )
 
         if (prepared) {
-            configureAutomaticAspectCrop(
-                activeCameraInputSize ?: size,
-                size
-            )
-
+            // The crop filter is deliberately NOT configured here. prepareVideo
+            // may have just closed the camera preview (see
+            // waitForPreviewThenStartStream); the filter must be attached only
+            // after the preview has been reopened.
             Log.e(
                 "PlayeriRTMP",
                 "prepareVideo prepared=true " +
@@ -698,6 +697,36 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
                     ?: bitrate
                     ?: (streamingSize["bitrate"] as Int)
 
+            val inputSize = activeCameraInputSize
+                ?: CameraUtils.computeBestCameraInputSize(
+                    getActivity(),
+                    cameraName,
+                    preset
+                )
+
+            // RootEncoder's prepareVideo() implicitly calls stopPreview() when the
+            // requested encoder geometry differs from the size the preview was
+            // opened with, and leaves onPreview = true — so the camera ends up
+            // closed and is never reopened, while the audio path keeps running.
+            // That produces a black local preview and an audio-only broadcast.
+            //
+            // The camera is opened at a different (4:3) input size on purpose and
+            // center-cropped to the encoder ratio, so the mismatch is permanent.
+            // Own the transition explicitly instead of leaving it implicit.
+            val previewGeometryDiffers =
+                inputSize.width != size.width || inputSize.height != size.height
+
+            if (previewGeometryDiffers && rtmpCamera.isOnPreview) {
+                Log.e(
+                    "PlayeriRTMP",
+                    "stopping preview before prepareVideo " +
+                        "(input=${inputSize.width}x${inputSize.height} " +
+                        "output=${size.width}x${size.height})"
+                )
+
+                rtmpCamera.stopPreview()
+            }
+
             rtmpCamera.forceBt709Color(forceBt709Color)
 
             (rtmpCamera.streamClient as? RtmpStreamClient)
@@ -720,6 +749,28 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
                 )
                 return
             }
+
+            // Reopen the camera at the input size ourselves. startStream() then
+            // resets the GL encoder size to the video encoder geometry, so the
+            // crop filter maps camera texture -> encoder output correctly.
+            if (!rtmpCamera.isOnPreview) {
+                activeCameraInputSize = inputSize
+                previewStartRequested = false
+
+                Log.e(
+                    "PlayeriRTMP",
+                    "reopening preview at ${inputSize.width}x${inputSize.height} " +
+                        "before startStream"
+                )
+
+                rtmpCamera.startPreview(
+                    cameraName,
+                    inputSize.width,
+                    inputSize.height
+                )
+            }
+
+            configureAutomaticAspectCrop(inputSize, size)
 
             Log.e(
                 "PlayeriRTMP",
