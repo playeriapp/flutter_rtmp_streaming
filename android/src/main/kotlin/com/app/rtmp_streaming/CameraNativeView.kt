@@ -99,11 +99,11 @@ class CameraNativeView(
     private var currentFilter: BaseFilterRender? = null
     private var currentFilterType: Int? = null
 
-    /** Camera texture size currently opened by startPreview(). */
+    /**
+     * Size the camera preview is currently open at. Always identical to the
+     * encoder size — see startPreview().
+     */
     private var activeCameraInputSize: Size? = null
-
-    /** Automatic centered crop used when camera and encoder ratios differ. */
-    private var automaticAspectCropFilter: CropFilterRender? = null
 
     /**
      * Encoder geometry is configured exactly once per stream session, before the
@@ -408,79 +408,6 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
         preparedVideoBitrate = 0
     }
 
-    /**
-     * Center-crops the camera texture to the encoder aspect ratio.
-     *
-     * CropFilterRender arguments are percentages: x, y, width and height.
-     */
-    private fun configureAutomaticAspectCrop(
-        cameraInput: Size,
-        encoderOutput: Size
-    ) {
-        val gl = rtmpCamera.glInterface ?: return
-
-        automaticAspectCropFilter?.let {
-            try {
-                gl.removeFilter(it)
-            } catch (_: Exception) {
-            }
-        }
-        automaticAspectCropFilter = null
-
-        val sourceAspect =
-            cameraInput.width.toDouble() / cameraInput.height.toDouble()
-        val outputAspect =
-            encoderOutput.width.toDouble() / encoderOutput.height.toDouble()
-
-        if (kotlin.math.abs(sourceAspect - outputAspect) / outputAspect <= 0.01) {
-            Log.e(
-                "PlayeriRTMP",
-                "aspectCrop not needed source=$sourceAspect output=$outputAspect"
-            )
-            return
-        }
-
-        val crop = CropFilterRender()
-
-        if (sourceAspect < outputAspect) {
-            val cropHeightPercent =
-                (sourceAspect / outputAspect * 100.0).toFloat()
-            val cropTopPercent = (100f - cropHeightPercent) / 2f
-
-            crop.setCropArea(
-                0f,
-                cropTopPercent,
-                100f,
-                cropHeightPercent
-            )
-
-            Log.e(
-                "PlayeriRTMP",
-                "aspectCrop vertical top=$cropTopPercent " +
-                    "height=$cropHeightPercent"
-            )
-        } else {
-            val cropWidthPercent =
-                (outputAspect / sourceAspect * 100.0).toFloat()
-            val cropLeftPercent = (100f - cropWidthPercent) / 2f
-
-            crop.setCropArea(
-                cropLeftPercent,
-                0f,
-                cropWidthPercent,
-                100f
-            )
-
-            Log.e(
-                "PlayeriRTMP",
-                "aspectCrop horizontal left=$cropLeftPercent " +
-                    "width=$cropWidthPercent"
-            )
-        }
-
-        gl.addFilter(0, crop)
-        automaticAspectCropFilter = crop
-    }
 
     fun prepareForVideoStreaming(result: MethodChannel.Result) {
         // Android 无需预准备音频，与 iOS 行为对齐为 no-op
@@ -778,11 +705,32 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
             (rtmpCamera.streamClient as? RtmpStreamClient)
                 ?.shouldSendPings(rtmpShouldSendPings)
 
+            val encoderSize = preparedOutputSize
+            val previewSize = activeCameraInputSize
+
+            if (
+                encoderSize != null &&
+                previewSize != null &&
+                (
+                    encoderSize.width != previewSize.width ||
+                        encoderSize.height != previewSize.height
+                    )
+            ) {
+                // Would trigger RootEncoder's GL/camera rebuild inside
+                // startStream, from which the camera does not recover. Fail
+                // loudly here rather than publishing a black stream.
+                finishPendingStreamStartError(
+                    "videoStreamingFailed",
+                    "Preview ${previewSize.width}x${previewSize.height} does not " +
+                        "match encoder ${encoderSize.width}x${encoderSize.height}."
+                )
+                return
+            }
+
             Log.e(
                 "PlayeriRTMP",
                 "native preview ready; starting RTMP stream " +
-                    "output=${preparedOutputSize?.let { "${it.width}x${it.height}" } ?: "-"} " +
-                    "input=${activeCameraInputSize?.let { "${it.width}x${it.height}" } ?: "-"}"
+                    "size=${encoderSize?.let { "${it.width}x${it.height}" } ?: "-"}"
             )
 
             rtmpCamera.startStream(url)
@@ -1572,17 +1520,12 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
         previewStartRequested = true
 
         return try {
-            val size =
-                CameraUtils.computeBestCameraInputSize(
-                    getActivity(),
-                    cameraName,
-                    preset
-                )
-
-            activeCameraInputSize = size
-
-            // Encoder geometry must be fixed BEFORE the camera opens. Doing it
-            // afterwards makes RootEncoder close the preview behind our back.
+            // Encoder geometry must be fixed BEFORE the camera opens, and the
+            // camera must then be opened at EXACTLY that geometry. Any
+            // difference between preview size and encoder size makes RootEncoder
+            // rebuild the GL pipeline and re-prepare the camera inside
+            // startStream() — and the camera never reopens, leaving a black
+            // preview and an audio-only broadcast.
             if (!ensureEncodersPrepared(lastStreamBitrate)) {
                 previewStartRequested = false
 
@@ -1596,9 +1539,18 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
                 return false
             }
 
+            // Read the size back from the preparation step rather than
+            // recomputing it, so the two can never diverge.
+            val size = preparedOutputSize
+                ?: throw IllegalStateException(
+                    "encoders reported prepared without an output size"
+                )
+
+            activeCameraInputSize = size
+
             Log.e(
                 "PlayeriRTMP",
-                "starting camera input=${size.width}x${size.height}, " +
+                "starting camera at encoder size ${size.width}x${size.height}, " +
                     "preset=$preset surface=${glView.width}x${glView.height}"
             )
 
@@ -1606,13 +1558,6 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
                 targetCamera,
                 size.width,
                 size.height
-            )
-
-            // The GL pipeline exists only once the preview is running, so the
-            // crop is attached here rather than at encoder preparation time.
-            configureAutomaticAspectCrop(
-                size,
-                preparedOutputSize ?: size
             )
 
             true
@@ -1799,7 +1744,6 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
             }
         }
 
-        automaticAspectCropFilter = null
         activeCameraInputSize = null
         activity = null
     }
