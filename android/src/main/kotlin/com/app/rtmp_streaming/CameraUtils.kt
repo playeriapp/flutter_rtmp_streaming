@@ -33,43 +33,99 @@ object CameraUtils {
         ResolutionPreset.max -> Pair(Int.MAX_VALUE, Int.MAX_VALUE) // 取设备最大
     }
 
-    /** 从可用尺寸中选取最接近目标 (targetW, targetH) 的尺寸；max 时取面积最大。 */
-    private fun selectClosestSize(available: Array<Size>, preset: ResolutionPreset): Size {
-        if (available.isEmpty()) throw IllegalArgumentException("No available sizes")
-        val (targetW, targetH) = getTargetSizeForPreset(preset)
-        return if (preset == ResolutionPreset.max) {
-            available.maxWithOrNull(CompareSizesByArea()) ?: available.first()
-        } else {
-            available.minByOrNull { size ->
-                val dw = size.width - targetW
-                val dh = size.height - targetH
-                dw * dw + dh * dh
-            } ?: available.first()
-        }
+
+ * Selects the supported size closest to the preset while preserving the
+ * preset's aspect ratio whenever the camera provides a matching size.
+ */
+private fun selectClosestSize(
+    available: Array<Size>,
+    preset: ResolutionPreset
+): Size {
+    require(available.isNotEmpty()) {
+        "No available camera sizes"
     }
 
-    @RequiresApi(Build.VERSION_CODES.LOLLIPOP)
-    fun computeBestPreviewSize(activity: Activity?,cameraName: String, presetArg: ResolutionPreset): Map<String,Any> {
-        val sizeList = getCameraResolutions(activity, cameraName)
-        val size: Size
-        val bitrate: Int
-        if (sizeList.isNotEmpty()) {
-            size = selectClosestSize(sizeList, presetArg)
-            bitrate = 1200 * 1000
-        } else {
-            var preset = presetArg
-            if (preset.ordinal > ResolutionPreset.high.ordinal) {
-                preset = ResolutionPreset.high
-            }
-            val profile = getBestAvailableCamcorderProfileForResolutionPreset(cameraName, preset)
-            size = Size(profile.videoFrameWidth, profile.videoFrameHeight)
-            bitrate = profile.videoBitRate
-        }
-        val map = HashMap<String, Any>()
-        map["size"] = size
-        map["bitrate"] = bitrate
-        return map
+    if (preset == ResolutionPreset.max) {
+        return available.maxWithOrNull(CompareSizesByArea())
+            ?: available.first()
     }
+
+    val (targetW, targetH) = getTargetSizeForPreset(preset)
+    val targetAspect = targetW.toDouble() / targetH.toDouble()
+
+    // Allow a small tolerance for camera modes whose dimensions are rounded.
+    // 2% is enough to group 16:9 with 16:9 without admitting 4:3.
+    val matchingAspectSizes = available.filter { size ->
+        val aspect = size.width.toDouble() / size.height.toDouble()
+        kotlin.math.abs(aspect - targetAspect) / targetAspect <= 0.02
+    }
+
+    val candidates = if (matchingAspectSizes.isNotEmpty()) {
+        matchingAspectSizes
+    } else {
+        Log.w(
+            "CameraUtils",
+            "No matching aspect ratio for preset=$preset " +
+                "target=${targetW}x${targetH}; falling back to all sizes"
+        )
+        available.asList()
+    }
+
+    return candidates.minByOrNull { size ->
+        val dw = size.width.toLong() - targetW.toLong()
+        val dh = size.height.toLong() - targetH.toLong()
+
+        // Long avoids overflow for large camera resolutions.
+        dw * dw + dh * dh
+    } ?: candidates.first()
+}
+
+    @RequiresApi(Build.VERSION_CODES.LOLLIPOP)
+fun computeBestPreviewSize(
+    activity: Activity?,
+    cameraName: String,
+    presetArg: ResolutionPreset
+): Map<String, Any> {
+    val sizeList = getCameraResolutions(activity, cameraName)
+
+    val size: Size
+    val bitrate: Int
+
+    if (sizeList.isNotEmpty()) {
+        size = selectClosestSize(sizeList, presetArg)
+        bitrate = 1200 * 1000
+    } else {
+        var preset = presetArg
+
+        if (preset.ordinal > ResolutionPreset.high.ordinal) {
+            preset = ResolutionPreset.high
+        }
+
+        val profile =
+            getBestAvailableCamcorderProfileForResolutionPreset(
+                cameraName,
+                preset
+            )
+
+        size = Size(
+            profile.videoFrameWidth,
+            profile.videoFrameHeight
+        )
+        bitrate = profile.videoBitRate
+    }
+
+    Log.e(
+        "PlayeriRTMP",
+        "preset=$presetArg selected=${size.width}x${size.height} " +
+            "aspect=${size.width.toDouble() / size.height.toDouble()} " +
+            "available=${sizeList.joinToString { "${it.width}x${it.height}" }}"
+    )
+
+    return hashMapOf(
+        "size" to size,
+        "bitrate" to bitrate
+    )
+}
 
     @RequiresApi(Build.VERSION_CODES.LOLLIPOP)
     fun computeBestCaptureSize(streamConfigurationMap: StreamConfigurationMap): Size {
