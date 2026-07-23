@@ -104,6 +104,14 @@ class CameraNativeView(
 
     /** Automatic centered crop used when camera and encoder ratios differ. */
     private var automaticAspectCropFilter: CropFilterRender? = null
+
+    /**
+     * Encoder geometry is configured exactly once per stream session, before the
+     * camera is opened. See ensureEncodersPrepared().
+     */
+    private var encodersPrepared = false
+    private var preparedOutputSize: Size? = null
+    private var preparedVideoBitrate = 0
     /** RootEncoder 2.7.0+：下一帧编码使用 BT.709 色彩（在 prepare 前设置） */
     private var forceBt709Color: Boolean = false
     /** RootEncoder 2.7.0+：RTMP 周期 ping，用于 RTT（须在与 startStream 前对 RtmpStreamClient 设置） */
@@ -200,6 +208,10 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
     isSurfaceReady = false
     previewStartRequested = false
 
+    // Both the stream and the camera are torn down below. The encoders must be
+    // prepared again, before the camera is reopened, on the next start.
+    invalidatePreparedEncoders()
+
     if (rtmpCamera.isStreaming) {
         resumeStreamAfterSurfaceCreated = true
         isRestoringFromSurfaceDestroy = true
@@ -256,6 +268,7 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
                 dartMessenger?.send(DartMessenger.EventType.RTMP_STOPPED, "Failed retry")
                 isRestoringFromSurfaceDestroy = false
                 rtmpCamera.stopStream()
+                invalidatePreparedEncoders()
             }
         }
     }
@@ -319,6 +332,80 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
         }
 
         return prepared
+    }
+
+    /**
+     * Configures the audio and video encoders for this session.
+     *
+     * MUST be called while the camera preview is NOT running. RootEncoder's
+     * prepareVideo() silently calls stopPreview() whenever the requested encoder
+     * geometry differs from the size the preview was opened with, and leaves its
+     * internal onPreview flag set to true — the camera then stays closed for the
+     * rest of the session while the audio encoder keeps running, producing a
+     * black preview and an audio-only broadcast. The camera is opened at a
+     * different (4:3) input size on purpose and center-cropped to the encoder
+     * ratio, so that geometry difference is permanent. Preparing the encoders
+     * before the camera is ever opened removes the branch entirely.
+     */
+    private fun ensureEncodersPrepared(bitrateHint: Int?): Boolean {
+        if (encodersPrepared) {
+            return true
+        }
+
+        if (rtmpCamera.isOnPreview) {
+            // Preparing here would tear the running preview down. Callers must
+            // prepare before opening the camera, or after stopping it.
+            Log.e(
+                "PlayeriRTMP",
+                "ensureEncodersPrepared refused — preview is already running"
+            )
+            return false
+        }
+
+        val streamingSize =
+            CameraUtils.computeBestPreviewSize(
+                getActivity(),
+                cameraName,
+                preset
+            )
+
+        val size = streamingSize["size"] as Size
+
+        val bitrateRes =
+            customVideoBitrate
+                ?: bitrateHint
+                ?: (streamingSize["bitrate"] as Int)
+
+        rtmpCamera.forceBt709Color(forceBt709Color)
+
+        if (!prepareAudioEncoder()) {
+            Log.e("PlayeriRTMP", "prepareAudio failed")
+            return false
+        }
+
+        if (!prepareVideoEncoder(size, bitrateRes)) {
+            Log.e("PlayeriRTMP", "prepareVideo failed")
+            return false
+        }
+
+        encodersPrepared = true
+        preparedOutputSize = size
+        preparedVideoBitrate = bitrateRes
+
+        // The adapter's ceiling must follow the bitrate actually in use, or it
+        // will drag a high-bitrate stream back down to its default maximum.
+        bitrateAdapter.setMaxBitrate(
+            bitrateRes + (customAudioBitrate ?: aBitrate)
+        )
+
+        return true
+    }
+
+    /** Encoders must be prepared again before every startStream(). */
+    private fun invalidatePreparedEncoders() {
+        encodersPrepared = false
+        preparedOutputSize = null
+        preparedVideoBitrate = 0
     }
 
     /**
@@ -551,18 +638,11 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
         //判断如果不是视频流的话并且其用了音频
         try {
             if (!rtmpCamera.isStreaming) {
-                val streamingSize = CameraUtils.computeBestPreviewSize(activity, cameraName, preset)
-                val size = streamingSize["size"] as Size
-                val bitrateRes = streamingSize["bitrate"] as Int
-                rtmpCamera.forceBt709Color(forceBt709Color)
-                if (prepareAudioEncoder() && prepareVideoEncoder(
-                        size,
-                        bitrateRes
-                    )
-                ) {
+                // Uses the same single preparation path; preparing again here
+                // would close a running preview.
+                if (ensureEncodersPrepared(null)) {
                     rtmpCamera.startRecord(filePath)
                 }
-
             } else {
                 rtmpCamera.startRecord(filePath)
             }
@@ -684,65 +764,10 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
         pendingStreamStartRunnable = null
 
         try {
-            val streamingSize =
-                CameraUtils.computeBestPreviewSize(
-                    getActivity(),
-                    cameraName,
-                    preset
-                )
-
-            val size = streamingSize["size"] as Size
-            val bitrateRes =
-                customVideoBitrate
-                    ?: bitrate
-                    ?: (streamingSize["bitrate"] as Int)
-
-            val inputSize = activeCameraInputSize
-                ?: CameraUtils.computeBestCameraInputSize(
-                    getActivity(),
-                    cameraName,
-                    preset
-                )
-
-            // RootEncoder's prepareVideo() implicitly calls stopPreview() when the
-            // requested encoder geometry differs from the size the preview was
-            // opened with, and leaves onPreview = true — so the camera ends up
-            // closed and is never reopened, while the audio path keeps running.
-            // That produces a black local preview and an audio-only broadcast.
-            //
-            // The camera is opened at a different (4:3) input size on purpose and
-            // center-cropped to the encoder ratio, so the mismatch is permanent.
-            // Own the transition explicitly instead of leaving it implicit.
-            val previewGeometryDiffers =
-                inputSize.width != size.width || inputSize.height != size.height
-
-            if (previewGeometryDiffers && rtmpCamera.isOnPreview) {
-                Log.e(
-                    "PlayeriRTMP",
-                    "stopping preview before prepareVideo " +
-                        "(input=${inputSize.width}x${inputSize.height} " +
-                        "output=${size.width}x${size.height})"
-                )
-
-                rtmpCamera.stopPreview()
-            }
-
-            rtmpCamera.forceBt709Color(forceBt709Color)
-
-            (rtmpCamera.streamClient as? RtmpStreamClient)
-                ?.shouldSendPings(rtmpShouldSendPings)
-
-            val prepared =
-                rtmpCamera.isRecording ||
-                    (
-                        prepareAudioEncoder() &&
-                            prepareVideoEncoder(
-                                size,
-                                bitrateRes
-                            )
-                        )
-
-            if (!prepared) {
+            // startPreview() has already prepared the encoders for this session,
+            // before the camera was opened. Nothing here may change encoder
+            // geometry, because that would close the running preview.
+            if (!rtmpCamera.isRecording && !ensureEncodersPrepared(bitrate)) {
                 finishPendingStreamStartError(
                     "videoStreamingFailed",
                     "Error preparing stream. This device cannot do it."
@@ -750,34 +775,40 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
                 return
             }
 
-            // Reopen the camera at the input size ourselves. startStream() then
-            // resets the GL encoder size to the video encoder geometry, so the
-            // crop filter maps camera texture -> encoder output correctly.
-            if (!rtmpCamera.isOnPreview) {
-                activeCameraInputSize = inputSize
-                previewStartRequested = false
-
-                Log.e(
-                    "PlayeriRTMP",
-                    "reopening preview at ${inputSize.width}x${inputSize.height} " +
-                        "before startStream"
-                )
-
-                rtmpCamera.startPreview(
-                    cameraName,
-                    inputSize.width,
-                    inputSize.height
-                )
-            }
-
-            configureAutomaticAspectCrop(inputSize, size)
+            (rtmpCamera.streamClient as? RtmpStreamClient)
+                ?.shouldSendPings(rtmpShouldSendPings)
 
             Log.e(
                 "PlayeriRTMP",
-                "native preview ready; starting RTMP stream"
+                "native preview ready; starting RTMP stream " +
+                    "output=${preparedOutputSize?.let { "${it.width}x${it.height}" } ?: "-"} " +
+                    "input=${activeCameraInputSize?.let { "${it.width}x${it.height}" } ?: "-"}"
             )
 
             rtmpCamera.startStream(url)
+
+            // The encoders were prepared before the requested bitrate was known,
+            // so apply it now. Changing it on the fly does not touch the camera.
+            val requestedBitrate = customVideoBitrate ?: bitrate
+
+            if (
+                requestedBitrate != null &&
+                requestedBitrate > 0 &&
+                requestedBitrate != preparedVideoBitrate
+            ) {
+                Log.e(
+                    "PlayeriRTMP",
+                    "raising bitrate $preparedVideoBitrate -> $requestedBitrate"
+                )
+
+                rtmpCamera.setVideoBitrateOnFly(requestedBitrate)
+                preparedVideoBitrate = requestedBitrate
+
+                bitrateAdapter.setMaxBitrate(
+                    requestedBitrate + (customAudioBitrate ?: aBitrate)
+                )
+            }
+
             finishPendingStreamStartSuccess()
         } catch (e: Exception) {
             Log.e(
@@ -1421,6 +1452,7 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
                 if (isStreaming) stopStream()
                 if (isRecording) stopRecord()
             }
+            invalidatePreparedEncoders()
             result.success(null)
         } catch (e: CameraAccessException) {
             result.error("videoRecordingFailed", e.message, null)
@@ -1449,9 +1481,10 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
             isRestoringFromSurfaceDestroy = false
             lastStreamUrl = null
             lastStreamBitrate = null
-            rtmpCamera.apply { 
+            rtmpCamera.apply {
                 if (isStreaming) stopStream()
             }
+            invalidatePreparedEncoders()
             result.success(null)
         } catch (e: CameraAccessException) {
             result.error("stopVideoStreamingFailed", e.message, null)
@@ -1548,6 +1581,21 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
 
             activeCameraInputSize = size
 
+            // Encoder geometry must be fixed BEFORE the camera opens. Doing it
+            // afterwards makes RootEncoder close the preview behind our back.
+            if (!ensureEncodersPrepared(lastStreamBitrate)) {
+                previewStartRequested = false
+
+                getActivity()?.runOnUiThread {
+                    dartMessenger?.send(
+                        DartMessenger.EventType.ERROR,
+                        "Error preparing stream. This device cannot do it."
+                    )
+                }
+
+                return false
+            }
+
             Log.e(
                 "PlayeriRTMP",
                 "starting camera input=${size.width}x${size.height}, " +
@@ -1558,6 +1606,13 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
                 targetCamera,
                 size.width,
                 size.height
+            )
+
+            // The GL pipeline exists only once the preview is running, so the
+            // crop is attached here rather than at encoder preparation time.
+            configureAutomaticAspectCrop(
+                size,
+                preparedOutputSize ?: size
             )
 
             true
@@ -1730,6 +1785,7 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
         isRestoringFromSurfaceDestroy = false
         lastStreamUrl = null
         lastStreamBitrate = null
+        invalidatePreparedEncoders()
 
         if (rtmpCamera.isOnPreview) {
             try {
