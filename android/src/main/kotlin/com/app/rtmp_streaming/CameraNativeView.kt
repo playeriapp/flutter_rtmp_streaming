@@ -7,6 +7,9 @@ import android.graphics.Color
 import android.hardware.camera2.CameraAccessException
 import android.media.MediaPlayer
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import com.pedro.encoder.input.gl.render.filters.BaseFilterRender
 import android.util.Log
 import android.util.Size
@@ -117,6 +120,28 @@ class CameraNativeView(
     private var resumeStreamAfterSurfaceCreated = false
     /** 因 Surface 销毁暂停推流时，忽略 stopStream 触发的 onDisconnect */
     private var isRestoringFromSurfaceDestroy = false
+
+    /** Main-thread gate for camera-preview and stream startup. */
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    /** True after startPreview() has been issued and until preview is ready. */
+    private var previewStartRequested = false
+
+    /** Prevents two RTMP start operations from preparing the encoder together. */
+    private var streamStartInProgress = false
+
+    /** Delayed readiness poll currently queued on the main looper. */
+    private var pendingStreamStartRunnable: Runnable? = null
+
+    /** Method-channel result waiting for native preview readiness. */
+    private var pendingStreamStartResult: MethodChannel.Result? = null
+
+    /** Guards delayed callbacks after PlatformView disposal. */
+    private var isDisposed = false
+
+    private val previewReadyTimeoutMs = 7000L
+    private val previewPollIntervalMs = 100L
+
     init {
 //        glView.isKeepAspectRatio = true
         glView.setAspectRatioMode(AspectRatioMode.Adjust)
@@ -173,6 +198,7 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
 
     isSurfaceCreated = false
     isSurfaceReady = false
+    previewStartRequested = false
 
     if (rtmpCamera.isStreaming) {
         resumeStreamAfterSurfaceCreated = true
@@ -551,46 +577,265 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
     }
 
 
-    fun startVideoStreaming(url: String?, bitrate: Int?, result: MethodChannel.Result) {
+    fun startVideoStreaming(
+        url: String?,
+        bitrate: Int?,
+        result: MethodChannel.Result
+    ) {
         Log.d("CameraNativeView", "startVideoStreaming url: $url")
+
         if (url == null) {
-            result.error("startVideoStreaming", "Must specify a url.", null)
+            result.error(
+                "startVideoStreaming",
+                "Must specify a url.",
+                null
+            )
             return
         }
 
-        try {
-            if (!rtmpCamera.isStreaming) {
-                lastStreamUrl = url
-                lastStreamBitrate = bitrate
-                val streamingSize = CameraUtils.computeBestPreviewSize(getActivity(), cameraName, preset)
-                val size = streamingSize["size"] as Size
-                val bitrateRes = customVideoBitrate ?: (bitrate ?: (streamingSize["bitrate"] as Int))
-                rtmpCamera.forceBt709Color(forceBt709Color)
-                (rtmpCamera.streamClient as? RtmpStreamClient)?.shouldSendPings(rtmpShouldSendPings)
-                if (rtmpCamera.isRecording || prepareAudioEncoder() && prepareVideoEncoder(
-                        size,
-                        bitrateRes
-                    )
-                ) {
-                    // ready to start streaming
-                    rtmpCamera.startStream(url)
-                } else {
-                    result.error(
-                        "videoStreamingFailed",
-                        "Error preparing stream, This device cant do it",
-                        null
+        if (rtmpCamera.isStreaming) {
+            try {
+                rtmpCamera.stopStream()
+                result.success(null)
+            } catch (e: Exception) {
+                result.error(
+                    "videoStreamingFailed",
+                    e.message,
+                    null
+                )
+            }
+            return
+        }
+
+        if (streamStartInProgress) {
+            result.error(
+                "videoStreamingFailed",
+                "A streaming start is already in progress.",
+                null
+            )
+            return
+        }
+
+        streamStartInProgress = true
+        pendingStreamStartResult = result
+        lastStreamUrl = url
+        lastStreamBitrate = bitrate
+
+        val deadlineMs =
+            SystemClock.uptimeMillis() + previewReadyTimeoutMs
+
+        waitForPreviewThenStartStream(
+            url,
+            bitrate,
+            deadlineMs
+        )
+    }
+
+    /**
+     * Waits for Camera2/RootEncoder preview readiness before preparing the
+     * encoder. Flutter frames only prove that the AndroidView exists; they do
+     * not prove that the native camera has finished opening.
+     */
+    private fun waitForPreviewThenStartStream(
+        url: String,
+        bitrate: Int?,
+        deadlineMs: Long
+    ) {
+        if (isDisposed) {
+            finishPendingStreamStartError(
+                "videoStreamingFailed",
+                "Camera view was disposed before streaming could start."
+            )
+            return
+        }
+
+        if (!isSurfaceCreated || !isSurfaceReady) {
+            scheduleStreamStartRetry(
+                url,
+                bitrate,
+                deadlineMs,
+                "surface not ready"
+            )
+            return
+        }
+
+        if (!rtmpCamera.isOnPreview) {
+            if (!previewStartRequested) {
+                val issued = startPreview(cameraName)
+
+                if (!issued) {
+                    scheduleStreamStartRetry(
+                        url,
+                        bitrate,
+                        deadlineMs,
+                        "preview start not issued"
                     )
                     return
                 }
-            } else {
-                rtmpCamera.stopStream()
             }
-            result.success(null)
-        } catch (e: CameraAccessException) {
-            result.error("videoStreamingFailed", e.message, null)
-        } catch (e: IOException) {
-            result.error("videoStreamingFailed", e.message, null)
+
+            scheduleStreamStartRetry(
+                url,
+                bitrate,
+                deadlineMs,
+                "camera preview opening"
+            )
+            return
         }
+
+        previewStartRequested = false
+        pendingStreamStartRunnable?.let {
+            mainHandler.removeCallbacks(it)
+        }
+        pendingStreamStartRunnable = null
+
+        try {
+            val streamingSize =
+                CameraUtils.computeBestPreviewSize(
+                    getActivity(),
+                    cameraName,
+                    preset
+                )
+
+            val size = streamingSize["size"] as Size
+            val bitrateRes =
+                customVideoBitrate
+                    ?: bitrate
+                    ?: (streamingSize["bitrate"] as Int)
+
+            rtmpCamera.forceBt709Color(forceBt709Color)
+
+            (rtmpCamera.streamClient as? RtmpStreamClient)
+                ?.shouldSendPings(rtmpShouldSendPings)
+
+            val prepared =
+                rtmpCamera.isRecording ||
+                    (
+                        prepareAudioEncoder() &&
+                            prepareVideoEncoder(
+                                size,
+                                bitrateRes
+                            )
+                        )
+
+            if (!prepared) {
+                finishPendingStreamStartError(
+                    "videoStreamingFailed",
+                    "Error preparing stream. This device cannot do it."
+                )
+                return
+            }
+
+            Log.e(
+                "PlayeriRTMP",
+                "native preview ready; starting RTMP stream"
+            )
+
+            rtmpCamera.startStream(url)
+            finishPendingStreamStartSuccess()
+        } catch (e: Exception) {
+            Log.e(
+                "CameraNativeView",
+                "start stream after preview readiness failed",
+                e
+            )
+
+            finishPendingStreamStartError(
+                "videoStreamingFailed",
+                e.message ?: "Failed to start video streaming."
+            )
+        }
+    }
+
+    private fun scheduleStreamStartRetry(
+        url: String,
+        bitrate: Int?,
+        deadlineMs: Long,
+        reason: String
+    ) {
+        if (SystemClock.uptimeMillis() >= deadlineMs) {
+            finishPendingStreamStartError(
+                "videoStreamingFailed",
+                "Camera preview did not become ready in time."
+            )
+            return
+        }
+
+        if (pendingStreamStartRunnable != null) {
+            return
+        }
+
+        Log.d(
+            "PlayeriRTMP",
+            "waiting for preview before stream: $reason"
+        )
+
+        val runnable = Runnable {
+            pendingStreamStartRunnable = null
+
+            waitForPreviewThenStartStream(
+                url,
+                bitrate,
+                deadlineMs
+            )
+        }
+
+        pendingStreamStartRunnable = runnable
+
+        mainHandler.postDelayed(
+            runnable,
+            previewPollIntervalMs
+        )
+    }
+
+    private fun finishPendingStreamStartSuccess() {
+        pendingStreamStartRunnable?.let {
+            mainHandler.removeCallbacks(it)
+        }
+        pendingStreamStartRunnable = null
+
+        val result = pendingStreamStartResult
+        pendingStreamStartResult = null
+        streamStartInProgress = false
+
+        result?.success(null)
+    }
+
+    private fun finishPendingStreamStartError(
+        code: String,
+        message: String
+    ) {
+        pendingStreamStartRunnable?.let {
+            mainHandler.removeCallbacks(it)
+        }
+        pendingStreamStartRunnable = null
+
+        val result = pendingStreamStartResult
+        pendingStreamStartResult = null
+        streamStartInProgress = false
+
+        result?.error(
+            code,
+            message,
+            null
+        )
+    }
+
+    private fun cancelPendingStreamStart(
+        message: String
+    ) {
+        if (
+            !streamStartInProgress &&
+            pendingStreamStartResult == null &&
+            pendingStreamStartRunnable == null
+        ) {
+            return
+        }
+
+        finishPendingStreamStartError(
+            "videoStreamingFailed",
+            message
+        )
     }
 
     fun startVideoRecordingAndStreaming(
@@ -1094,6 +1339,7 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
     }
 
     fun stopVideoRecordingOrStreaming(result: MethodChannel.Result) {
+        cancelPendingStreamStart("Streaming start was cancelled.")
         try {
             resumeStreamAfterSurfaceCreated = false
             isRestoringFromSurfaceDestroy = false
@@ -1125,6 +1371,7 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
     }
 
     fun stopVideoStreaming(result: MethodChannel.Result) {
+        cancelPendingStreamStart("Streaming start was cancelled.")
         try {
             resumeStreamAfterSurfaceCreated = false
             isRestoringFromSurfaceDestroy = false
@@ -1183,23 +1430,50 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
         } else {
             cameraNameArg
         }
+
         cameraName = targetCamera
+
+        if (isDisposed) {
+            return false
+        }
 
         Log.d(
             "CameraNativeView",
             "startPreview: preset=$preset camera=$targetCamera " +
                 "surface=${glView.width}x${glView.height}"
-            )
+        )
+
         if (!isSurfaceCreated || !isSurfaceReady) {
-            Log.d("CameraNativeView", "startPreview skipped: surface not ready")
+            Log.d(
+                "CameraNativeView",
+                "startPreview skipped: surface not ready"
+            )
             return false
         }
-        return try {
-            val size = CameraUtils.computeBestCameraInputSize(
-                getActivity(),
-                cameraName,
-                preset
+
+        if (rtmpCamera.isOnPreview) {
+            previewStartRequested = false
+            return true
+        }
+
+        if (previewStartRequested) {
+            Log.d(
+                "CameraNativeView",
+                "startPreview already requested; waiting for Camera2"
             )
+            return true
+        }
+
+        previewStartRequested = true
+
+        return try {
+            val size =
+                CameraUtils.computeBestCameraInputSize(
+                    getActivity(),
+                    cameraName,
+                    preset
+                )
+
             activeCameraInputSize = size
 
             Log.e(
@@ -1213,43 +1487,64 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
                 size.width,
                 size.height
             )
+
             true
         } catch (e: CameraAccessException) {
+            previewStartRequested = false
             close()
+
             getActivity()?.runOnUiThread {
                 dartMessenger?.send(
                     DartMessenger.EventType.ERROR,
                     "CameraAccessException"
                 )
             }
+
             false
         } catch (e: Exception) {
-            Log.e("CameraNativeView", "startPreview failed", e)
+            previewStartRequested = false
+
+            Log.e(
+                "CameraNativeView",
+                "startPreview failed",
+                e
+            )
+
             getActivity()?.runOnUiThread {
                 dartMessenger?.send(
                     DartMessenger.EventType.ERROR,
                     e.message ?: "startPreview failed"
                 )
             }
+
             false
         }
     }
 
     private fun restorePreviewAfterSurfaceChange() {
-        if (!isSurfaceCreated) {
+        if (
+            isDisposed ||
+            !isSurfaceCreated ||
+            !isSurfaceReady
+        ) {
             return
         }
-        if (resumeStreamAfterSurfaceCreated && lastStreamUrl != null) {
+
+        if (
+            resumeStreamAfterSurfaceCreated &&
+            lastStreamUrl != null
+        ) {
             resumeStreamAfterSurfaceChange()
             return
         }
+
+        // Never stop/reopen a preview while the RTMP start gate is waiting for
+        // that same preview. Doing so creates the intermittent startup race.
         if (rtmpCamera.isOnPreview) {
-            try {
-                rtmpCamera.stopCamera()
-            } catch (e: Exception) {
-                Log.e("CameraNativeView", "stopCamera before restore failed", e)
-            }
+            previewStartRequested = false
+            return
         }
+
         startPreview(cameraName)
     }
 
@@ -1260,6 +1555,7 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
             return
         }
         resumeStreamAfterSurfaceCreated = false
+        previewStartRequested = false
         try {
             if (rtmpCamera.isOnPreview) {
                 rtmpCamera.stopCamera()
@@ -1341,18 +1637,33 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
     }
 
     override fun dispose() {
+        isDisposed = true
+        cancelPendingStreamStart(
+            "Camera view was disposed before streaming could start."
+        )
+
+        mainHandler.removeCallbacksAndMessages(null)
+
         isSurfaceCreated = false
         isSurfaceReady = false
+        previewStartRequested = false
         resumeStreamAfterSurfaceCreated = false
         isRestoringFromSurfaceDestroy = false
         lastStreamUrl = null
         lastStreamBitrate = null
 
         if (rtmpCamera.isOnPreview) {
-        rtmpCamera.stopCamera()
+            try {
+                rtmpCamera.stopCamera()
+            } catch (e: Exception) {
+                Log.e(
+                    "CameraNativeView",
+                    "stopCamera during dispose failed",
+                    e
+                )
+            }
         }
 
-        
         automaticAspectCropFilter = null
         activeCameraInputSize = null
         activity = null
