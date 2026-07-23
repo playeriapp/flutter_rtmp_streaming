@@ -95,6 +95,12 @@ class CameraNativeView(
     /** 当前已设置的滤镜实例，removeFilter 必须用同一实例才能生效 */
     private var currentFilter: BaseFilterRender? = null
     private var currentFilterType: Int? = null
+
+    /** Camera texture size currently opened by startPreview(). */
+    private var activeCameraInputSize: Size? = null
+
+    /** Automatic centered crop used when camera and encoder ratios differ. */
+    private var automaticAspectCropFilter: CropFilterRender? = null
     /** RootEncoder 2.7.0+：下一帧编码使用 BT.709 色彩（在 prepare 前设置） */
     private var forceBt709Color: Boolean = false
     /** RootEncoder 2.7.0+：RTMP 周期 ping，用于 RTT（须在与 startStream 前对 RtmpStreamClient 设置） */
@@ -261,7 +267,8 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
 
         Log.e(
             "PlayeriRTMP",
-            "prepareVideo requested=${size.width}x${size.height} " +
+            "prepareVideo output=${size.width}x${size.height} " +
+                "cameraInput=${activeCameraInputSize?.let { "${it.width}x${it.height}" } ?: "-"} " +
                 "rotation=$rotation surface=${glView.width}x${glView.height}"
         )
 
@@ -274,7 +281,11 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
         )
 
         if (prepared) {
-    
+            configureAutomaticAspectCrop(
+                activeCameraInputSize ?: size,
+                size
+            )
+
             Log.e(
                 "PlayeriRTMP",
                 "prepareVideo prepared=true " +
@@ -283,6 +294,80 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
         }
 
         return prepared
+    }
+
+    /**
+     * Center-crops the camera texture to the encoder aspect ratio.
+     *
+     * CropFilterRender arguments are percentages: x, y, width and height.
+     */
+    private fun configureAutomaticAspectCrop(
+        cameraInput: Size,
+        encoderOutput: Size
+    ) {
+        val gl = rtmpCamera.glInterface ?: return
+
+        automaticAspectCropFilter?.let {
+            try {
+                gl.removeFilter(it)
+            } catch (_: Exception) {
+            }
+        }
+        automaticAspectCropFilter = null
+
+        val sourceAspect =
+            cameraInput.width.toDouble() / cameraInput.height.toDouble()
+        val outputAspect =
+            encoderOutput.width.toDouble() / encoderOutput.height.toDouble()
+
+        if (kotlin.math.abs(sourceAspect - outputAspect) / outputAspect <= 0.01) {
+            Log.e(
+                "PlayeriRTMP",
+                "aspectCrop not needed source=$sourceAspect output=$outputAspect"
+            )
+            return
+        }
+
+        val crop = CropFilterRender()
+
+        if (sourceAspect < outputAspect) {
+            val cropHeightPercent =
+                (sourceAspect / outputAspect * 100.0).toFloat()
+            val cropTopPercent = (100f - cropHeightPercent) / 2f
+
+            crop.setCropArea(
+                0f,
+                cropTopPercent,
+                100f,
+                cropHeightPercent
+            )
+
+            Log.e(
+                "PlayeriRTMP",
+                "aspectCrop vertical top=$cropTopPercent " +
+                    "height=$cropHeightPercent"
+            )
+        } else {
+            val cropWidthPercent =
+                (outputAspect / sourceAspect * 100.0).toFloat()
+            val cropLeftPercent = (100f - cropWidthPercent) / 2f
+
+            crop.setCropArea(
+                cropLeftPercent,
+                0f,
+                cropWidthPercent,
+                100f
+            )
+
+            Log.e(
+                "PlayeriRTMP",
+                "aspectCrop horizontal left=$cropLeftPercent " +
+                    "width=$cropWidthPercent"
+            )
+        }
+
+        gl.addFilter(0, crop)
+        automaticAspectCropFilter = crop
     }
 
     fun prepareForVideoStreaming(result: MethodChannel.Result) {
@@ -1110,14 +1195,24 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
             return false
         }
         return try {
-            val previewSize = CameraUtils.computeBestPreviewSize(getActivity(), cameraName, preset)
-            val size = previewSize["size"] as Size
-            Log.d(
-                "CameraNativeView",
-                "starting camera preview: requested=${size.width}x${size.height}, " +
-                    "surface=${glView.width}x${glView.height}"
+            val size = CameraUtils.computeBestCameraInputSize(
+                getActivity(),
+                cameraName,
+                preset
             )
-            rtmpCamera.startPreview(targetCamera, size.width, size.height)
+            activeCameraInputSize = size
+
+            Log.e(
+                "PlayeriRTMP",
+                "starting camera input=${size.width}x${size.height}, " +
+                    "preset=$preset surface=${glView.width}x${glView.height}"
+            )
+
+            rtmpCamera.startPreview(
+                targetCamera,
+                size.width,
+                size.height
+            )
             true
         } catch (e: CameraAccessException) {
             close()
@@ -1257,6 +1352,9 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
         rtmpCamera.stopCamera()
         }
 
+        
+        automaticAspectCropFilter = null
+        activeCameraInputSize = null
         activity = null
     }
 
