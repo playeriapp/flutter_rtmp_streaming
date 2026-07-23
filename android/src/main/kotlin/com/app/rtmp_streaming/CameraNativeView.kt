@@ -114,6 +114,7 @@ class CameraNativeView(
     init {
 //        glView.isKeepAspectRatio = true
         glView.setAspectRatioMode(AspectRatioMode.Adjust)
+        glView.setAutoHandleOrientation(true)
         glView.holder.addCallback(this)
         rtmpCamera = RtmpCamera2(glView, this)
         rtmpCamera.streamClient.setReTries(10)
@@ -258,7 +259,32 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
     private fun prepareVideoEncoder(size: Size, bitrate: Int): Boolean {
         val fps = customVideoFps ?: 30
         val rotation = CameraHelper.getCameraOrientation(getActivity() ?: glView.context)
-        return rtmpCamera.prepareVideo(size.width, size.height, fps, bitrate, rotation)
+
+        Log.e(
+            "PlayeriRTMP",
+            "prepareVideo requested=${size.width}x${size.height} " +
+                "rotation=$rotation surface=${glView.width}x${glView.height}"
+        )
+
+        val prepared = rtmpCamera.prepareVideo(
+            size.width,
+            size.height,
+            fps,
+            bitrate,
+            rotation
+        )
+
+        if (prepared) {
+            glView.setAutoHandleOrientation(true)
+
+            Log.e(
+                "PlayeriRTMP",
+                "prepareVideo prepared=true " +
+                    "stream=${rtmpCamera.streamWidth}x${rtmpCamera.streamHeight}"
+            )
+        }
+
+        return prepared
     }
 
     fun prepareForVideoStreaming(result: MethodChannel.Result) {
