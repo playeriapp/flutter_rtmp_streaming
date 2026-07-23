@@ -594,16 +594,11 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
         }
 
         if (rtmpCamera.isStreaming) {
-            try {
-                rtmpCamera.stopStream()
-                result.success(null)
-            } catch (e: Exception) {
-                result.error(
-                    "videoStreamingFailed",
-                    e.message,
-                    null
-                )
-            }
+            Log.d(
+                "CameraNativeView",
+                "startVideoStreaming ignored because stream is already active"
+            )
+            result.success(null)
             return
         }
 
