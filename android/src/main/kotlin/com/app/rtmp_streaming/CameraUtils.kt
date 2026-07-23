@@ -34,10 +34,11 @@ object CameraUtils {
     }
 
 
- * Selects the supported size closest to the preset while preserving the
- * preset's aspect ratio whenever the camera provides a matching size.
- */
-private fun selectClosestSize(
+    /**
+     * Selects the supported size closest to the preset while preserving the
+     * preset's aspect ratio whenever the camera provides a matching size.
+     */
+    private fun selectClosestSize(
     available: Array<Size>,
     preset: ResolutionPreset
 ): Size {
@@ -152,7 +153,7 @@ private fun selectClosestSize(
 
 
     @RequiresApi(Build.VERSION_CODES.LOLLIPOP)
-fun computeBestPreviewSize(
+    fun computeBestPreviewSize(
     activity: Activity?,
     cameraName: String,
     presetArg: ResolutionPreset
