@@ -60,6 +60,10 @@ kotlin {
 
 dependencies {
     implementation 'androidx.annotation:annotation:1.9.1'
-    implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk7:$kotlin_version"
-    implementation 'com.github.pedroSG94.RootEncoder:library:2.7.5'
+    // kotlin-stdlib intentionally not declared: the Kotlin Gradle Plugin supplies
+    // it at the compiler's own version. Pinning it dragged in stdlib 2.4.0,
+    // whose metadata a 2.1.0 compiler cannot read.
+    // RootEncoder 2.7.1+ is built with Kotlin 2.3.x (metadata 2.3.0), which a
+    // 2.1.0 compiler rejects. 2.7.0 is the newest build on Kotlin 2.2.21.
+    implementation 'com.github.pedroSG94.RootEncoder:library:2.7.0'
 }
