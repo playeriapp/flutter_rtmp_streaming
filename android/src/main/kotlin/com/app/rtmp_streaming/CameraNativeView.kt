@@ -114,7 +114,6 @@ class CameraNativeView(
     init {
 //        glView.isKeepAspectRatio = true
         glView.setAspectRatioMode(AspectRatioMode.Adjust)
-        glView.setAutoHandleOrientation(true)
         glView.holder.addCallback(this)
         rtmpCamera = RtmpCamera2(glView, this)
         rtmpCamera.streamClient.setReTries(10)
@@ -275,8 +274,7 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
         )
 
         if (prepared) {
-            glView.setAutoHandleOrientation(true)
-
+    
             Log.e(
                 "PlayeriRTMP",
                 "prepareVideo prepared=true " +
