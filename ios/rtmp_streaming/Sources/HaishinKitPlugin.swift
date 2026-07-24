@@ -89,11 +89,38 @@ public final class HaishinKitPlugin: NSObject,FlutterPlugin {
   }
   //publish
   private func publish(name: String) async{
-    _ = try? await rtmpStream?.publish(name)
+    guard let stream = rtmpStream else {
+      eventSink?(["eventType": "error",
+                  "errorDescription": "publish failed: rtmp stream unavailable"])
+      return
+    }
+    do {
+      // publish() sets expectedResponse = .publishStart and awaits it, so a
+      // normal return already proves the server sent NetStream.Publish.Start.
+      // This is the only correct place to report success.
+      _ = try await stream.publish(name)
+      eventSink?(["eventType": "success",
+                  "errorDescription": "publication started"])
+    } catch {
+      // Never swallow this. A failed publish leaves the connection open with
+      // no media flowing, which looks identical to a healthy stream.
+      eventSink?(["eventType": "error",
+                  "errorDescription": "publish failed: \(error)"])
+    }
   }
   // play
   private func play(url: String) async{
-    _ = try? await rtmpStream?.play(url)
+    guard let stream = rtmpStream else {
+      eventSink?(["eventType": "error",
+                  "errorDescription": "play failed: rtmp stream unavailable"])
+      return
+    }
+    do {
+      _ = try await stream.play(url)
+    } catch {
+      eventSink?(["eventType": "error",
+                  "errorDescription": "play failed: \(error)"])
+    }
   }
   //获取可用摄像头
   private func availableCameras() -> [[String: Any]] {
@@ -204,16 +231,19 @@ public final class HaishinKitPlugin: NSObject,FlutterPlugin {
           print("connect status: \(status.code)")
           switch status.code {
           case RTMPConnection.Code.connectSuccess.rawValue:
-            // 在主线程执行 UI 更新
-            //            await MainActor.run {
-            if let isPlay {
-              Task { await self.play(url: newName) }
-            } else {
-              Task { await self.publish(name: newName) }
-            }
-            self.eventSink?(["eventType": "success",
-                             "errorDescription": "connection success"])
-            //            }
+            // Publishing is NOT started here. This status fires while
+            // RTMPConnection.connect() is still running, before it calls
+            // createStream() on the registered streams. At this point
+            // RTMPStream.id is still defaultID (0), so a publish command sent
+            // now carries an invalid stream id, is ignored by the server, and
+            // times out silently. connect() below is the correct join point.
+            //
+            // Reported as "wait", not "success": the transport is up but no
+            // media is flowing yet. Dart maps "success" straight to the
+            // streaming phase, which would show LIVE before the server has
+            // accepted the publication.
+            self.eventSink?(["eventType": "wait",
+                             "errorDescription": "connected; starting publication"])
             
           case RTMPConnection.Code.connectFailed.rawValue:
             guard retries <= 3 else {
@@ -227,6 +257,11 @@ public final class HaishinKitPlugin: NSObject,FlutterPlugin {
             // 异步延迟，避免阻塞主线程
             try await Task.sleep(nanoseconds: UInt64(pow(2.0, Double(retries)) * 1_000_000_000))
             try await newRtmpConnection.connect(newUrl)
+            if isPlay != nil {
+              await self.play(url: newName)
+            } else {
+              await self.publish(name: newName)
+            }
             //            await MainActor.run {
             self.eventSink?(["eventType": "rtmp_retry",
                              "errorDescription": "connection failed " + status.code])
@@ -252,6 +287,13 @@ public final class HaishinKitPlugin: NSObject,FlutterPlugin {
       )
       
       try await newRtmpConnection.connect(newUrl)
+      // connect() only returns after createStream() has assigned a valid
+      // stream id, so this is the earliest safe point to publish.
+      if isPlay != nil {
+        await play(url: newName)
+      } else {
+        await publish(name: newName)
+      }
       return nil
     }catch {
       eventSink?(["eventType" : "rtmp_stopped",
