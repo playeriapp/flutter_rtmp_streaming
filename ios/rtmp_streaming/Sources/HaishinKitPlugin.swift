@@ -5,7 +5,6 @@ import Flutter
 import FlutterMacOS
 #endif
 import HaishinKit
-import RTMPHaishinKit
 import AVFoundation
 
 public final class HaishinKitPlugin: NSObject,FlutterPlugin {
@@ -46,7 +45,7 @@ public final class HaishinKitPlugin: NSObject,FlutterPlugin {
   // rtmpStream直播 流
   private var rtmpStream: RTMPStream?
   // 录制流
-  private var recorderStream: StreamRecorder?
+  private var recorderStream: HKStreamRecorder?
   //重试次数
   private var retries: Int = 0
   private var enableAudio: Bool = true
@@ -143,7 +142,7 @@ public final class HaishinKitPlugin: NSObject,FlutterPlugin {
       }
       mixer?.addOutput(stream,startRunning: false)
       rtmpStream = stream
-      let recorder = StreamRecorder()
+      let recorder = HKStreamRecorder()
       mixer?.addOutput(recorder,startRunning: true)
       recorderStream = recorder
       await mixer?.attachAudio(isEnable: enableAudio)
@@ -423,13 +422,13 @@ public final class HaishinKitPlugin: NSObject,FlutterPlugin {
       guard let newRtmpStream = rtmpStream else { return FlutterError(code: "setAudioSettingsError", message: "rtmp Stream error", details: nil)}
       var audioSettings = await newRtmpStream.audioSettings
       audioSettings.bitRate = bitrate.intValue
-      _ = try? await newRtmpStream.setAudioSettings(audioSettings)
+      await newRtmpStream.setAudioSettings(audioSettings)
       return nil
     }catch{
       return FlutterError(code: "setAudioSettingsError", message: "catch error", details: nil)
     }
   }
-  //设置视频（含 HaishinKit 2.2.1+ 码率模式、2.2.2+ expectedFrameRate → RTMP onMetaData framerate）
+  //设置视频（HaishinKit 2.0.9: bitRateMode average/constant；expectedFrameRate 不支持）
   private func setVideoSettings(
     bitrate: NSNumber?,
     width: NSNumber?,
@@ -439,7 +438,6 @@ public final class HaishinKitPlugin: NSObject,FlutterPlugin {
     expectedFrameRate: NSNumber?,
     bitRateMode: String?
   ) async -> FlutterError? {
-    do {
       guard let newRtmpStream = rtmpStream else {
         return FlutterError(code: "setVideoSettingsError", message: "rtmp Stream error", details: nil)
       }
@@ -456,9 +454,6 @@ public final class HaishinKitPlugin: NSObject,FlutterPlugin {
       if let profileLevel {
         videoSettings.profileLevel = ProfileLevel(rawValue: profileLevel)?.kVTProfileLevel ?? ProfileLevel.H264_Baseline_AutoLevel.kVTProfileLevel
       }
-      if let expectedFrameRate {
-        videoSettings.expectedFrameRate = expectedFrameRate.doubleValue
-      }
       if let bitRateMode {
         switch bitRateMode.lowercased() {
         case "average":
@@ -470,20 +465,13 @@ public final class HaishinKitPlugin: NSObject,FlutterPlugin {
             return FlutterError(code: "setVideoSettingsError", message: "constant bit rate requires iOS 16+", details: nil)
           }
         case "variable":
-          if #available(iOS 26.0, *) {
-            videoSettings.bitRateMode = .variable
-          } else {
-            return FlutterError(code: "setVideoSettingsError", message: "variable bit rate requires iOS 26+", details: nil)
-          }
+          return FlutterError(code: "setVideoSettingsError", message: "variable bit rate requires HaishinKit 2.2+ (not available)", details: nil)
         default:
           break
         }
       }
-      try await newRtmpStream.setVideoSettings(videoSettings)
+      await newRtmpStream.setVideoSettings(videoSettings)
       return nil
-    } catch {
-      return FlutterError(code: "setVideoSettingsError", message: error.localizedDescription, details: nil)
-    }
   }
 
   #if os(iOS)

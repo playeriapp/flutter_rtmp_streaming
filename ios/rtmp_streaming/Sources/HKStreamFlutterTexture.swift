@@ -135,12 +135,12 @@ final class HKStreamFlutterTexture: NSObject, FlutterTexture {
   }
 }
 
-extension HKStreamFlutterTexture: StreamOutput {
+extension HKStreamFlutterTexture: HKStreamOutput {
   // MARK: HKStreamOutput
-  func stream(_ stream: some StreamConvertible, didOutput audio: AVAudioBuffer, when: AVAudioTime) {
+  func stream(_ stream: some HKStream, didOutput audio: AVAudioBuffer, when: AVAudioTime) {
   }
   
-  func stream(_ stream: some StreamConvertible, didOutput video: CMSampleBuffer) {
+  func stream(_ stream: some HKStream, didOutput video: CMSampleBuffer) {
     queue.async(flags: .barrier) { [weak self] in
       self?._currentSampleBuffer = video
     }
