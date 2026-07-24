@@ -13,14 +13,14 @@ This plugin provides easy-to-use API for RTMP streaming functionality in Flutter
   s.homepage         = 'https://github.com/whevether/flutter_rtmp_broadcaster'
   s.license          = { :file => '../LICENSE' }
   s.author           = { 'keep_wan' => 'whevether@outlook.com' }
-  
+
   s.source           = { :path => '.' }
   s.source_files     = 'rtmp_streaming/Sources/**/*'
   s.dependency 'Flutter'
-  s.dependency 'HaishinKit', '2.0.9'
-  
-  s.platform = :ios, '15.0'
+  s.dependency 'HaishinKit', '~> 2.2'
+  s.dependency 'RTMPHaishinKit', '~> 2.2'
 
+  s.platform = :ios, '15.0'
   # Flutter.framework does not contain a i386 slice.
   s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES', 'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386' }
   s.swift_version = '5.0'
