@@ -325,7 +325,11 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
             return true
         }
         val bitrate = customAudioBitrate ?: aBitrate
-        return rtmpCamera.prepareAudio(bitrate, 32000, true)
+        // 48 kHz is the native input rate on essentially every device. Requesting
+        // 32 kHz forces AudioRecord off the fast-capture path and through a
+        // resampler with larger buffers, which adds input latency that lands
+        // directly in the audio timestamps.
+        return rtmpCamera.prepareAudio(bitrate, 48000, true)
     }
 
     private fun prepareVideoEncoder(size: Size, bitrate: Int): Boolean {
@@ -411,9 +415,16 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
         // the amount of PCM data consumed. This prevents encoder/callback
         // latency from being stamped into the outgoing AAC timeline.
         // RootEncoder requires this to be set before startStream/startRecord.
+        // Both tracks on the wall clock. Do NOT set audio to TimestampMode.BUFFER
+        // on RootEncoder 2.7.0: AudioEncoder.calculatePts truncates the sample
+        // duration to a long before scaling to microseconds, so the accumulator
+        // always adds 0. The frozen PTS trips BaseEncoder.fixTimeStamp(), which
+        // re-anchors the audio track to the wall clock at encoder-output time and
+        // never releases it — a permanent ~200 ms audio delay. Fixed upstream in
+        // 2.7.1.
         rtmpCamera.setTimestampMode(
             TimestampMode.CLOCK,
-            TimestampMode.BUFFER
+            TimestampMode.CLOCK
         )
 
         if (!prepareAudioEncoder()) {
