@@ -23,16 +23,17 @@ final class MediaMixerHandler: NSObject {
 #endif
   }
   
-  func addOutput(_ output: some MediaMixerOutput, startRunning: Bool) {
-    Task {
-      await mixer.addOutput(output)
-      if(startRunning == true){
-        await mixer.startRunning()
-      }
-      
+  func addOutput(_ output: some MediaMixerOutput, startRunning: Bool) async {
+    await mixer.addOutput(output)
+    if startRunning {
+      await mixer.startRunning()
     }
   }
-  
+
+  func startRunning() async {
+    await mixer.startRunning()
+  }
+
   func removeOutput(_ output: some MediaMixerOutput) {
     Task { await mixer.removeOutput(output) }
   }
