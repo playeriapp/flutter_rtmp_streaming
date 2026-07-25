@@ -19,6 +19,7 @@ import android.view.View
 import androidx.annotation.RequiresApi
 import com.app.rtmp_streaming.CameraPermissions.ResolutionPreset
 import com.pedro.common.ConnectChecker
+import com.pedro.encoder.TimestampMode
 import com.pedro.encoder.input.gl.SpriteGestureController
 import com.pedro.encoder.input.gl.render.filters.BasicDeformationFilterRender
 import com.pedro.encoder.input.gl.render.filters.BeautyFilterRender
@@ -405,6 +406,15 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
                 ?: (streamingSize["bitrate"] as Int)
 
         rtmpCamera.forceBt709Color(forceBt709Color)
+
+        // Keep video on the shared monotonic clock, but derive audio PTS from
+        // the amount of PCM data consumed. This prevents encoder/callback
+        // latency from being stamped into the outgoing AAC timeline.
+        // RootEncoder requires this to be set before startStream/startRecord.
+        rtmpCamera.setTimestampMode(
+            TimestampMode.CLOCK,
+            TimestampMode.BUFFER
+        )
 
         if (!prepareAudioEncoder()) {
             Log.e("PlayeriRTMP", "prepareAudio failed")
