@@ -276,11 +276,16 @@ public final class HaishinKitPlugin: NSObject,FlutterPlugin {
           }
         }
       }
+      // frameInterval was nil, leaving HaishinKit's default 2s
+      // maxKeyFrameIntervalDuration. Ant Media's Mp4Muxer/HLSMuxer discard every
+      // video packet until the first keyframe while passing audio through
+      // ungated, so a 2s GOP puts the video track up to 2s behind the audio
+      // track for the whole session. Halving the interval halves that worst case.
       await setVideoSettings(
         bitrate: frameRate,
         width: nil,
         height: nil,
-        frameInterval: nil,
+        frameInterval: 1,
         profileLevel: nil,
         expectedFrameRate: nil,
         bitRateMode: nil

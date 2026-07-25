@@ -148,6 +148,33 @@ class CameraNativeView(
     private var isDisposed = false
 
     private val previewReadyTimeoutMs = 7000L
+
+    /**
+     * Ant Media creates Mp4Muxer and HLSMuxer on vert.x worker threads after
+     * ingest has already begun accepting packets. Each independently discards
+     * every video packet until it sees a keyframe:
+     *
+     *   Mp4Muxer - First video packet is not key frame. It will drop for direct muxing.
+     *   HLSMuxer - First video packet is not key frame. It will drop for direct muxing.
+     *
+     * Audio is not gated this way, so the video track begins up to one full GOP
+     * after the audio track and stays offset for the entire session. Measured on
+     * stream bf3a2c3d: a 1.589s drop window produced a 1.476s head gap in the
+     * recorded MP4, with audio at start_time 0.214 and video at 1.690.
+     *
+     * Bursting keyframes across the muxer-initialisation window bounds that wait
+     * to the burst spacing instead of the GOP length.
+     */
+    private val keyFrameBurstRunnables = mutableListOf<Runnable>()
+
+    private val keyFrameBurstDelaysMs = longArrayOf(250, 500, 1000, 1500, 2000, 2500)
+
+    /**
+     * Seconds between keyframes. RootEncoder's 5-argument prepareVideo overload
+     * is a backward-compatibility shim that hardcodes 2; the 6-argument overload
+     * below takes this explicitly.
+     */
+    private val keyFrameIntervalSeconds = 1
     private val previewPollIntervalMs = 100L
 
     init {
@@ -316,6 +343,7 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
             size.height,
             fps,
             bitrate,
+            keyFrameIntervalSeconds,
             rotation
         )
 
@@ -735,6 +763,9 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
 
             rtmpCamera.startStream(url)
 
+            // Bound the server-side muxer keyframe wait. See keyFrameBurstDelaysMs.
+            burstKeyFramesForMuxerStartup()
+
             // The encoders were prepared before the requested bitrate was known,
             // so apply it now. Changing it on the fly does not touch the camera.
             val requestedBitrate = customVideoBitrate ?: bitrate
@@ -811,6 +842,32 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
             runnable,
             previewPollIntervalMs
         )
+    }
+
+    /**
+     * Requests a short series of keyframes across the window in which Ant Media
+     * brings its muxers up. Idempotent and harmless if the muxers were already
+     * satisfied by the encoder's own opening IDR.
+     */
+    private fun burstKeyFramesForMuxerStartup() {
+        cancelKeyFrameBurst()
+
+        for (delayMs in keyFrameBurstDelaysMs) {
+            val runnable = Runnable {
+                if (isDisposed) return@Runnable
+                if (!rtmpCamera.isStreaming) return@Runnable
+
+                rtmpCamera.requestKeyFrame()
+            }
+
+            keyFrameBurstRunnables.add(runnable)
+            mainHandler.postDelayed(runnable, delayMs)
+        }
+    }
+
+    private fun cancelKeyFrameBurst() {
+        keyFrameBurstRunnables.forEach { mainHandler.removeCallbacks(it) }
+        keyFrameBurstRunnables.clear()
     }
 
     private fun finishPendingStreamStartSuccess() {
@@ -1423,6 +1480,7 @@ override fun surfaceDestroyed(holder: SurfaceHolder) {
     }
 
     fun stopVideoStreaming(result: MethodChannel.Result) {
+        cancelKeyFrameBurst()
         cancelPendingStreamStart("Streaming start was cancelled.")
         try {
             resumeStreamAfterSurfaceCreated = false
