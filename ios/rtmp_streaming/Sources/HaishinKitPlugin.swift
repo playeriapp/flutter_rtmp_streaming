@@ -149,12 +149,13 @@ public final class HaishinKitPlugin: NSObject,FlutterPlugin {
   }
   
   private func prepareForVideoStreaming() async -> FlutterError? {
-    guard let newMixer = mixer else {
+    guard mixer != nil else {
       return FlutterError(code: "prepareForVideoStreamingError", message: "mixer empty", details: nil)
     }
-    if enableAudio {
-      await newMixer.attachAudio(isEnable: true)
-    }
+
+    // Audio and video are attached during initialize(), before the mixer starts.
+    // Re-attaching the microphone here restarts/reconfigures the audio capture
+    // path immediately before publication and can introduce a fixed audio lag.
     return nil
   }
 
@@ -167,11 +168,15 @@ public final class HaishinKitPlugin: NSObject,FlutterPlugin {
       if mixer == nil {
         mixer = MediaMixerHandler()
       }
-      mixer?.addOutput(stream,startRunning: false)
       rtmpStream = stream
       let recorder = HKStreamRecorder()
-      mixer?.addOutput(recorder,startRunning: true)
       recorderStream = recorder
+
+      // Configure both capture tracks before starting MediaMixer. Previously the
+      // recorder output started the mixer while audio/video attachment was still
+      // in progress, and prepareForVideoStreaming() then attached audio again.
+      // Starting once after full configuration keeps both tracks on the same
+      // capture-session timeline and avoids resetting the audio pipeline.
       await mixer?.attachAudio(isEnable: enableAudio)
       guard
         let size: CGSize = await mixer?.attachVideo(resolution: resolution,cameraId: cameraId),
@@ -179,6 +184,10 @@ public final class HaishinKitPlugin: NSObject,FlutterPlugin {
       else {
         return nil
       }
+
+      await mixer?.addOutput(stream, startRunning: false)
+      await mixer?.addOutput(recorder, startRunning: false)
+      await mixer?.startRunning()
       let eventId = Int(bitPattern: ObjectIdentifier(self))
       if let texture {
         return [
