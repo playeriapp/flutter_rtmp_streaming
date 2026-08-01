@@ -168,7 +168,7 @@ class CameraNativeView(
      */
     private val keyFrameBurstRunnables = mutableListOf<Runnable>()
 
-    private val keyFrameBurstDelaysMs = longArrayOf(60, 120, 250, 370, 500, 650 1000, 1500, 2000, 2500)
+    private val keyFrameBurstDelaysMs = longArrayOf(60, 120, 250, 370, 500, 650, 1000, 1500, 2000, 2500)
 
     /**
      * Seconds between keyframes. RootEncoder's 5-argument prepareVideo overload
